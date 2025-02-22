@@ -214,6 +214,7 @@ class NOAATidesAndCurrentsSensor(Entity):
         self._unit_system = unit_system
         self.sensor = CustomNOAASensor(station_id, timezone, unit_system)
         self._state = None
+        self._last_update = None
 
 
     @property
@@ -234,10 +235,21 @@ class NOAATidesAndCurrentsSensor(Entity):
 
 
     def noaa_coops_update(self):
-        _LOGGER.debug("update queried.")
+        _LOGGER.debug("Update queried.")
         try:
             self.sensor.refresh()
             self._state = self.sensor.get_state_from_raw_data()
+            self._last_update = datetime.now()
+        except Exception as e:
+            _LOGGER.error(f"Error Occurred: {e.args}")
+            self._state = {"current_tide_estimate": str(e)}
+
+
+    def update_without_calling_noaa(self):
+        _LOGGER.debug("Update queried without NOAA.")
+        try:
+            self._state = self.sensor.get_state_from_raw_data()
+            self._last_update = datetime.now()
         except Exception as e:
             _LOGGER.error(f"Error Occurred: {e.args}")
             self._state = {"current_tide_estimate": str(e)}
@@ -245,11 +257,12 @@ class NOAATidesAndCurrentsSensor(Entity):
 
     async def async_update(self):
         """Get the latest data from NOAA Tides and Currents API."""
-        if self._state is not None and not self.sensor.needs_refresh():
+        if self._state is None or self.sensor.needs_refresh():
+            ghass.async_add_executor_job(self.noaa_coops_update)
+        elif self._state is not None and self._last_update is not None and self._last_update + timedelta(minutes=5) < datetime.now():
+            ghass.async_add_executor_job(self.update_without_calling_noaa)
+        else:
             _LOGGER.debug("Data exist with a tide in at most 24 hours, not querying NOAA.")
-            return
-
-        ghass.async_add_executor_job(self.noaa_coops_update)
 
 
 class NOAATidesAndCurrentsSensorCopy(Entity):
