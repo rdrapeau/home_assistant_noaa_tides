@@ -21,7 +21,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.util.unit_system import METRIC_SYSTEM
 from homeassistant.components.sensor import SensorDeviceClass
 
-# from sensor_wrapper import CustomNOAASensor
+WALKABLE_TIDE_LIMIT = 8.5
 TIME_FORMAT = "%m/%d/%Y %I:%M %p"
 
 class CustomNOAASensor(object):
@@ -31,6 +31,55 @@ class CustomNOAASensor(object):
         self._unit_system = unit_system
         self._station = None
         self._data = None
+
+
+    def get_tide_estimate(self, time, next_tide_time, next_tide, previous_tide_time, previous_tide):
+        if previous_tide_time > time or time > next_tide_time:
+            return None
+
+        predicted_period = (next_tide_time - previous_tide_time).seconds
+        if next_tide[1] == "H":
+            low_tide_level = previous_tide[0]
+            high_tide_level = next_tide[0]
+            tide_factor = 50 - (50 * math.cos((time - previous_tide_time).seconds * math.pi / predicted_period))
+        else:
+            low_tide_level = next_tide[0]
+            high_tide_level = previous_tide[0]
+            tide_factor = 50 + (50 * math.cos((time - previous_tide_time).seconds * math.pi / predicted_period))
+
+        return round(low_tide_level + (tide_factor / 100.0) * (high_tide_level - low_tide_level), 3), tide_factor
+
+
+    def get_walkable_times(self, tides):
+        start_time = tides[0][0]
+        end_time = tides[-1][0]
+        times = [start_time + timedelta(minutes=i) for i in range(1, int((end_time - start_time).total_seconds() // 60))]
+
+        start = None
+        next_tide_time, next_tide = tides[1]
+        previous_tide_time, previous_tide = tides[0]
+        next_tide_index = 2
+
+        walkable_times = []
+        for time in times:
+            if time >= next_tide_time:
+                previous_tide_time, previous_tide = next_tide_time, next_tide
+                next_tide_time, next_tide = tides[next_tide_index]
+                next_tide_index += 1
+
+            tide, _ = self.get_tide_estimate(time, next_tide_time, next_tide, previous_tide_time, previous_tide)
+            if tide <= WALKABLE_TIDE_LIMIT and start is None:
+                start = time 
+
+            if tide > WALKABLE_TIDE_LIMIT and start is not None:
+                walkable_times.append((start, time))
+                start = None
+
+        if start is not None:
+            walkable_times.append((start, tides[-1][0]))
+
+        now = datetime.now()
+        return [(start.strftime("%I:%M %p"), end.strftime("%I:%M %p")) for start, end in walkable_times if start.date() == now.date()]
 
 
     def get_state_from_raw_data(self):
@@ -52,18 +101,9 @@ class CustomNOAASensor(object):
 
         next_tide_time, next_tide = tides[next_tide_index]
         previous_tide_time, previous_tide = tides[next_tide_index - 1]
+        current_tide_estimate, tide_factor = self.get_tide_estimate(now, next_tide_time, next_tide, previous_tide_time, previous_tide)
 
-        predicted_period = (next_tide_time - previous_tide_time).seconds
-        if next_tide[1] == "H":
-            low_tide_level = previous_tide[0]
-            high_tide_level = next_tide[0]
-            tide_factor = 50 - (50 * math.cos((now - previous_tide_time).seconds * math.pi / predicted_period))
-        else:
-            low_tide_level = next_tide[0]
-            high_tide_level = previous_tide[0]
-            tide_factor = 50 + (50 * math.cos((now - previous_tide_time).seconds * math.pi / predicted_period))
-
-        current_tide_estimate = round(low_tide_level + (tide_factor / 100.0) * (high_tide_level - low_tide_level), 3)
+        walkable_times = self.get_walkable_times(tides)
 
         return {
             "next_tide_time": next_tide_time.strftime(TIME_FORMAT),
@@ -75,7 +115,8 @@ class CustomNOAASensor(object):
             "raw_tide_times": ','.join([time.strftime(TIME_FORMAT) for time, _ in tides]),
             "raw_tide_levels": ','.join([str(tide[0]) for _, tide in tides]),
             "current_tide_estimate": current_tide_estimate,
-            "tide_factor": tide_factor
+            "tide_factor": tide_factor,
+            "walkable_times": walkable_times
         }
 
 
